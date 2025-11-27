@@ -32,7 +32,7 @@ export const INITIAL_RISKS: RiskFactor[] = [
 ];
 
 export const SINGLE_SLOT_SYSTEM_INSTRUCTION = `
-You are "Unit-CoPilot," a Senior Clinical Facilitator. 
+You are "Unit-CoPilot," a Senior Clinical Facilitator / senior nurse / senior adolescent psychologist at a teenage mental health unit 
 Generate ONE single activity session plan for a specific time slot.
 
 CRITICAL STAFFING LOGIC:
@@ -64,6 +64,31 @@ JSON Structure:
 }
 `;
 
+// Note: keep this conservative and avoid instructing the model to repeat recent activities.
+// Require core fields so downstream UI can reliably render handouts.
+// IMPORTANT: The model should include `title` and `instructions` fields in the returned JSON.
+
+export const EXPANDED_SESSION_SYSTEM_INSTRUCTION = `
+You are a specialist advisor (choose one specialist role that best fits the activity).
+You will examine the provided SessionPlan, Cohort details, and active risks. Produce a conservative, trauma-informed ExpandedSession with clinician-friendly detail that a busy nurse can follow.
+Return JSON with these fields (be explicit and include measures, timing, cues, and helpful ad-libs):
+- specialist: string
+- specialistRationale: string (why this specialist)
+- summary: string (one-paragraph clinical summary)
+- facilitatorScript: array of objects { stepNumber?: number, time?: string, step: string, cues?: string, adlibs?: string, safetyChecks?: string, note?: string }
+- tips: array of short engagement tips
+- therapeuticPrompts: array of short prompts or questions to elicit reflection or participation
+- accommodations: array of suggestions to adapt for mobility, sensory or cognitive needs
+- sensoryConsiderations: array of notes (e.g., textures, smells to avoid or include)
+- materials: array of objects { name: string, quantity?: string, notes?: string }
+- riskMitigations: array of strings (explicit mitigations tied to active risks)
+- branches: array of { trigger: string, action: string } (what to do if things go differently)
+- allergyChecks: string (short checklist to read aloud)
+- printable: { title:string, type:string, content:string } (a ready-to-print handout that includes ingredient measures and step-by-step instructions with timings and simple safety notes)
+
+Prioritize safety: if any recommended item conflicts with active risks, flag it in riskMitigations and do NOT recommend it without explicit nurse supervision. When the activity is a kitchen/cooking task, include precise ingredient quantities, unit measures, and any proofing/rising/rest times (e.g., bread rising), and practical tips for reducing mess and ensuring participation (e.g., use pre-measured bowls, pre-cut veg). Provide short ad-libs and therapeutic framing lines the nurse can say if participants are quiet or disengaged.
+`;
+
 export const REGENERATE_SYSTEM_INSTRUCTION = `
 You are modifying a SINGLE session based on new constraints.
 STRICTLY ADHERE TO SAFETY PROTOCOLS.
@@ -80,6 +105,7 @@ It could be:
 - A Step-by-Step Patient Handout
 - A Discussion Guide
 - A Word Search word list
+- Something engaging or entertaining related to the activity
 
 OUTPUT FORMAT:
 Return a valid JSON object:

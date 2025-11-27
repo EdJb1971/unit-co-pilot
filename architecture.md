@@ -1,58 +1,74 @@
-**Overview**
-- **Purpose**: Document the high-level architecture for this small Vite + React + TypeScript app so contributors can quickly understand responsibilities and data flow.
-- **Tech stack**: `Vite`, `React`, `TypeScript`.
 
-**Repo Structure**
-- **Root files**: `App.tsx`, `index.tsx`, `index.html`, `tsconfig.json`, `package.json`, `vite.config.ts`.
-- **Types / constants / metadata**: `types.ts`, `constants.ts`, `metadata.json`.
-- **Components**: located in the `components/` folder.
-- **Services**: located in the `services/` folder.
+# Architecture — Unit Co-Pilot
 
-**Key Components**
-- **`RegenerateDialog.tsx`**: UI dialog to confirm or trigger regeneration actions.
-- **`RiskToggle.tsx`**: Control that toggles a risk-related mode/setting in the UI.
-- **`SessionCard.tsx`**: Presents per-session information and actions to the user.
+This document captures the current implementation and design decisions for the app so maintainers can reason about data flow, safety, and extension points.
 
-Each component is a focused presentational/interactive piece. Prefer keeping business logic in services or hooks rather than inside UI components.
+## Tech stack
+- Vite + React + TypeScript
+- Browser-only persistence via `localStorage` (no server required by default)
 
-**Services**
-- **`services/geminiService.ts`**: Encapsulates external API calls or model interactions. Keep API-specific request/response shapes here and expose small, well-typed functions for the UI.
-- **`services/storageService.ts`**: Handles persistence (likely `localStorage` or similar). Abstracts save/load operations so components don't require persistence logic.
+## Repo layout (important files)
+- `App.tsx` — application shell, startup hooks, migrations and scheduled cleanup runner
+- `index.tsx`, `index.html` — entry points
+- `components/` — UI components
+  - `SessionCard.tsx` — per-slot UI and primary orchestration of generate/chat/review flows
+  - `ChatModal.tsx` — linear transcript UI, autosave, quick prompts, sends to `proposeSessionEdits`
+  - `ChangeReviewModal.tsx` — human review UI for proposed changes; accepts/declines patches
+  - `VentModal.tsx` — ephemeral vent interface
+- `services/` — core application logic
+  - `geminiService.ts` — LLM integration and helpers
+  - `storageService.ts` — local persistence, scheduled deletion, versioning, and change records
 
-Keep services side-effecting, well-typed, and testable. Return plain data structures (not DOM elements or framework classes).
+## Services & key functions
+- `services/geminiService.ts`
+  - `generateDailyPlan(cohort, risks)` — creates an initial day plan
+  - `generateExpandedSession(plan, slotId, context)` — returns an expanded session object including `printable` intended for handouts
+  - `proposeSessionEdits(plan, transcript, cohort, risks, options)` — analyzes transcript and returns a structured proposal `{ session, patches, explanation, safetyFlags }`
+  - `chatVent(messages, options)` — runs local safety checks and returns an LLM-style response while defaulting to ephemeral behavior
+  - Helpers: `detectSafetyConcerns`, `anonymizeMessages`, `detectFacilitatorName`
 
-**Data Flow & State**
-- **User actions** in components -> call service functions in `services/` -> services perform I/O (API, persistence) -> components update local state or props.
-- There is no global store by default; components manage local state and use `storageService` for persistence. If state sharing increases, consider adding a lightweight state solution (React Context or Zustand).
+- `services/storageService.ts`
+  - Plan persistence: `savePlan`, `loadPlan`, `savePlanSmart`, `savePlanVersion`
+  - Expanded session cache: `saveExpandedSession`, `loadExpandedSession`
+  - Chat transcripts: `saveChatTranscript`, `loadChatTranscript`, `deleteChatTranscript`, `scheduleChatTranscriptDeletion`, `performScheduledChatCleanup`
+  - Audit artifacts: `saveChangeRecord`
 
-**Build & Run**
-- **Install**: `npm install`
-- **Dev**: `npm run dev` (Vite dev server)
-- **Build**: `npm run build`
-- **Preview**: `npm run preview`
+## Data flow (concise)
+1. Generate day plan: `generateDailyPlan` → `savePlanSmart(date, plan)`
+2. Expand slot or create handout: `generateExpandedSession` → `saveExpandedSession(date, slotId, expanded)`
+3. Chat editing flow:
+   - Facilitator opens `ChatModal` and types messages (autosaved via `saveChatTranscript`)
+   - On "Propose changes", `proposeSessionEdits(plan, transcript, ...)` is called
+   - `ChangeReviewModal` shows `proposed` session and `patches` — user selects which changes to accept
+   - On accept: `SessionCard` applies minimal changes to the `DailyPlan` object, writes a `PlanVersion` and `ChangeRecord`, calls `savePlanSmart`, and either deletes or schedules deletion of the transcript
 
-If `package.json` uses different scripts, prefer the scripts defined there.
+4. Vent Mode:
+   - `VentModal` collects messages, calls `chatVent`
+   - `chatVent` runs local safety heuristics and will not forward first-person self-harm/violence; users can copy/export the ephemeral transcript
 
-**Testing**
-- No tests included in the repository by default. Recommended first steps:
-  - Add unit tests for `services/` (API shapes, storage behavior).
-  - Add component-level tests for key components (`SessionCard`, `RiskToggle`).
+## Safety and privacy design decisions
+- Local-first: everything persisted by default is in `localStorage`. No telemetry or server sync unless you add it explicitly.
+- Human-in-the-loop: proposed edits from the model are presented to humans — no automatic application.
+- Vent mode: ephemeral-by-default with safety block and canned guidance for dangerous messages.
 
-**Observability & Quality**
-- Add ESLint + Prettier configs if not present.
-- Add basic type-safe runtime checks for external API responses in `geminiService.ts`.
+## Packaging and Dev notes
+- `scripts/generate-icon.cjs` produces `icons/icon.ico` from the SVG icons using `sharp` + `to-ico`. If you can't install `sharp` on Windows, run `npm run generate:icons` on a machine with the toolchain, or remove `sharp` and use a fallback PNG-only approach.
+- Electron scaffolding exists in `electron/` with `electron/main.js` and `electron/preload.js`; use `npm run electron:build` to build a Windows installer — local build steps required.
 
-**Security & Privacy**
-- Do not store sensitive API keys in source; prefer environment variables.
-- Sanitize and validate external inputs before rendering.
+## Operational & maintenance notes
+- On startup `App` runs migrations and `performScheduledChatCleanup()` to remove transcripts that were scheduled for deletion.
+- `savePlanSmart` attempts to avoid overwriting changes made in other tabs via a simple `lastModified` check and prompts the user on conflict.
 
-**Notes & Next Steps**
-- Add a simple diagram (sequence or component) to show calls between UI -> `geminiService` -> remote API and persistence.
-- Add a small CONTRIBUTING or developer guide with `npm` scripts and a recommended local dev workflow.
-- Consider adding automated CI checks (lint, typecheck, tests) on PRs.
+## Known issues & next improvements
+- LLM sometimes returns malformed JSON — `geminiService` contains hardening code (safe parsing, retries, logging) but more few-shot prompts and stricter schema enforcement are still recommended for `generateExpandedSession` and `proposeSessionEdits`.
+- No automated tests yet — add unit tests for `proposeSessionEdits` parsing, `detectSafetyConcerns`, and `storageService` behavior.
+- Consider optional encrypted backup/sync for multi-device usage (requires a server or encrypted cloud storage).
 
-**Contact / Ownership**
-- If you want, tell me who owns which areas (services, components) and I can expand sections with responsibilities and coding guidelines.
+## Where to start when contributing
+1. Read `services/geminiService.ts` to understand prompts and response parsing.
+2. Run `npm install` and `npm start` to boot the app locally.
+3. Inspect `components/SessionCard.tsx` and `components/ChangeReviewModal.tsx` to see the apply flow and where to wire additional acceptance rules.
 
 ---
-Generated: concise architectural overview for the current codebase.
+
+

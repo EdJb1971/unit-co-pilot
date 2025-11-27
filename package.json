@@ -3,10 +3,17 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
+    "start": "vite",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "cap:build": "npm run build && npx cap copy android",
+    "cap:open": "npx cap open android",
+    "electron:dev": "npm run build && electron .",
+    "electron:build": "npm run build && electron-builder --win",
+    "generate:icons": "node scripts/generate-icon.cjs"
   },
   "dependencies": {
     "react": "^19.2.0",
@@ -18,6 +25,25 @@
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "@capacitor/cli": "^5.0.0",
+    "electron": "^26.0.0",
+    "electron-builder": "^23.6.0",
+    "sharp": "^0.32.0",
+    "png-to-ico": "^1.0.0",
+    "to-ico": "^1.0.0"
+  },
+  "build": {
+    "appId": "com.example.unitcopilot",
+    "productName": "Unit Co-Pilot",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "icons/icon.ico"
+    }
   }
 }

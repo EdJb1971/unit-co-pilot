@@ -1,0 +1,6 @@
+{
+  "appId": "com.example.unitcopilot",
+  "appName": "Unit Co-Pilot",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
