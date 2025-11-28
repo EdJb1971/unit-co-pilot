@@ -97,9 +97,37 @@ export const proposeSessionEdits = async (
                         changes: {
                             type: Type.OBJECT,
                             properties: {
-                                session: { type: Type.OBJECT },
-                                expanded: { type: Type.OBJECT },
-                                patches: { type: Type.ARRAY, items: { type: Type.OBJECT } }
+                                session: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        title: { type: Type.STRING },
+                                        therapeuticGoal: { type: Type.STRING },
+                                        instructions: { type: Type.ARRAY, items: { type: Type.STRING } }
+                                    }
+                                },
+                                expanded: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        printable: {
+                                            type: Type.OBJECT,
+                                            properties: {
+                                                title: { type: Type.STRING },
+                                                content: { type: Type.STRING }
+                                            }
+                                        }
+                                    }
+                                },
+                                patches: {
+                                    type: Type.ARRAY,
+                                    items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                            op: { type: Type.STRING },
+                                            path: { type: Type.STRING },
+                                            value: { type: Type.STRING }
+                                        }
+                                    }
+                                }
                             }
                         },
                         explanation: { type: Type.STRING },
@@ -110,12 +138,67 @@ export const proposeSessionEdits = async (
         });
 
         const text = response.text || '{}';
-        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const parsed = JSON.parse(jsonStr);
+        // Debug raw response for easier troubleshooting
+        try { console.debug('proposeSessionEdits raw response:', text); } catch (_) {}
 
-        // Basic validation: ensure changes exists
-        if (!parsed || typeof parsed !== 'object') return { changes: {} };
-        return { changes: parsed.changes || {}, explanation: parsed.explanation || '', safetyFlags: Array.isArray(parsed.safetyFlags) ? parsed.safetyFlags : [] };
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+
+        let parsed: any = {};
+        try {
+            parsed = JSON.parse(jsonStr);
+        } catch (pe) {
+            console.warn('proposeSessionEdits JSON parse failed, attempting recovery', pe);
+            // Try to recover by extracting first JSON object block
+            try {
+                const firstBrace = jsonStr.indexOf('{');
+                const lastBrace = jsonStr.lastIndexOf('}');
+                if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+                    const sub = jsonStr.slice(firstBrace, lastBrace + 1);
+                    parsed = JSON.parse(sub);
+                    console.warn('Recovered JSON for proposeSessionEdits by substring extraction');
+                } else {
+                    // As a last resort, try to find a "changes" object and parse that substring
+                    const changesIdx = jsonStr.indexOf('"changes"');
+                    if (changesIdx !== -1) {
+                        const chStart = jsonStr.indexOf('{', changesIdx);
+                        const chEnd = jsonStr.indexOf('}', chStart);
+                        if (chStart !== -1 && chEnd !== -1) {
+                            const sub = jsonStr.slice(chStart, chEnd + 1);
+                            parsed = JSON.parse(sub);
+                        }
+                    }
+                }
+            } catch (recErr) {
+                console.warn('Recovery parse failed for proposeSessionEdits', recErr);
+                parsed = {};
+            }
+        }
+
+        // Normalize parsed shape: ensure we return an object with .changes
+        let changes: any = {};
+        try {
+            if (parsed && typeof parsed === 'object') {
+                // If the top-level looks like a 'changes' object (contains expected keys), treat parsed as changes
+                const maybeKeys = ['session', 'expanded', 'patches'];
+                const hasAny = maybeKeys.some(k => Object.prototype.hasOwnProperty.call(parsed, k));
+                if (hasAny) {
+                    changes = parsed;
+                } else if (parsed.changes && typeof parsed.changes === 'object') {
+                    changes = parsed.changes;
+                } else if (typeof parsed.changes === 'string') {
+                    try { changes = JSON.parse(parsed.changes); } catch (_) { changes = {}; }
+                } else {
+                    changes = parsed.changes || {};
+                }
+            }
+        } catch (normErr) {
+            console.warn('Failed to normalize proposeSessionEdits parsed object', normErr);
+            changes = {};
+        }
+
+        try { console.debug('proposeSessionEdits parsed:', { parsed, changes }); } catch (_) {}
+
+        return { changes: changes || {}, explanation: (parsed && parsed.explanation) ? parsed.explanation : '', safetyFlags: Array.isArray(parsed?.safetyFlags) ? parsed.safetyFlags : [] };
     } catch (e) {
         console.error('proposeSessionEdits error', e);
         return { changes: {}, explanation: 'LLM call failed', safetyFlags: [] };

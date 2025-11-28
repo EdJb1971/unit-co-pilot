@@ -1,6 +1,9 @@
 {
-  "appId": "com.example.unitcopilot",
+  "appId": "com.unitcopilot.app",
   "appName": "Unit Co-Pilot",
   "webDir": "dist",
-  "bundledWebRuntime": false
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
 }

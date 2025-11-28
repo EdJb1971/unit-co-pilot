@@ -68,7 +68,10 @@ export const SessionCard: React.FC<Props> = ({
                         setFrontInstructions(lines.slice(0, 6));
                     }
                 } else {
-                    setFrontInstructions(plan.instructions || []);
+                    const ins = plan.instructions;
+                    if (Array.isArray(ins)) setFrontInstructions(ins);
+                    else if (typeof ins === 'string') setFrontInstructions(String(ins).split('\n').map(l => l.trim()).filter(Boolean));
+                    else setFrontInstructions([]);
                 }
             } catch (e) {
                 setHasCached(false);
@@ -77,8 +80,57 @@ export const SessionCard: React.FC<Props> = ({
 
   // Keep frontInstructions in sync if plan.instructions change externally
   useEffect(() => {
-    if (!expandedSession) setFrontInstructions(plan.instructions || []);
+        if (!expandedSession) {
+            const ins = plan.instructions;
+            if (Array.isArray(ins)) setFrontInstructions(ins);
+            else if (typeof ins === 'string') setFrontInstructions(String(ins).split('\n').map(l => l.trim()).filter(Boolean));
+            else setFrontInstructions([]);
+        }
   }, [plan.instructions, expandedSession]);
+
+    // Normalize toolAudit to an array for safe rendering (repair corrupted stored values)
+    const auditList = React.useMemo(() => {
+        const raw = (plan && (plan.toolAudit || []));
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === 'string') {
+            try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) return parsed;
+            } catch (_) {
+                // fallback: split comma-separated
+                return String(raw).split(/,\s*/).map(s => s.trim()).filter(Boolean);
+            }
+        }
+        return [];
+    }, [plan.toolAudit]);
+
+    // Attempt gentle repair of persisted plan.toolAudit if it's corrupted as a string
+    useEffect(() => {
+        if (!date) return;
+        if (typeof plan.toolAudit === 'string') {
+            try {
+                let repaired: any = null;
+                try { repaired = JSON.parse(plan.toolAudit); } catch (_) { repaired = String(plan.toolAudit).split(/,\s*/).map(s => s.trim()).filter(Boolean); }
+                const saved = loadPlan(date || '');
+                if (saved) {
+                    const updatedSlots = saved.slots.map(s => {
+                        if (s.plan.id === plan.id) {
+                            return { ...s, plan: { ...s.plan, toolAudit: repaired } };
+                        }
+                        return s;
+                    });
+                    const updated = { ...saved, slots: updatedSlots };
+                    const res = savePlanSmart(saved.date, updated);
+                    if (res.ok) {
+                        console.debug('Repaired persisted toolAudit for', plan.id);
+                        if (typeof onSavePlan === 'function') onSavePlan(updated);
+                    }
+                }
+            } catch (e) {
+                // swallow repair errors
+            }
+        }
+    }, [plan.toolAudit, date]);
 
   const toggleAuditItem = (index: number) => {
     const newSet = new Set(checkedAudit);
@@ -231,12 +283,15 @@ export const SessionCard: React.FC<Props> = ({
                                         safetyFlags={proposedSafetyFlags}
                                         onClose={() => { setReviewOpen(false); setProposedChanges(null); setProposedExplanation(undefined); setProposedSafetyFlags(undefined); }}
                                             onApply={async (acceptedKeys: string[], options?: { clearNow?: boolean; clearAfterMinutes?: number; keepTranscript?: boolean }) => {
-                        // Apply selected keys from proposedChanges
-                        if (!date) { alert('Missing date'); return; }
-                        const saved = loadPlan(date || '');
-                        const beforePlan = saved ? { ...saved } : null;
-                        const changeId = Math.random().toString(36).slice(2);
-                        const diff: Record<string, any> = {};
+                                                // Debug: log what we're about to apply
+                                                try { console.debug('Apply invoked', { proposedChanges, acceptedKeys, options }); } catch (_) {}
+                                                // Apply selected keys from proposedChanges
+                                                if (!date) { alert('Missing date'); return; }
+                                                const saved = loadPlan(date || '');
+                                                const beforePlan = saved ? { ...saved } : null;
+                                                const changeId = Math.random().toString(36).slice(2);
+                                                const diff: Record<string, any> = {};
+                                                let saveResGlobal: any = null;
 
                         // Start with updating plan slot if proposedChanges.session exists
                         try {
@@ -270,33 +325,190 @@ export const SessionCard: React.FC<Props> = ({
 
                             // Basic patches support: array of {op, path, value}
                             if (Array.isArray(proposedChanges.patches) && acceptedKeys.includes('patches')) {
-                                // naive apply: only handle replace at top-level session fields
                                 const patches = proposedChanges.patches as any[];
+                                // track whether patches modified session or expanded so we can persist them
+                                let appliedSessionPatch = false;
+                                let appliedExpandedPatch = false;
+                                const existingExpandedBefore = loadExpandedSession(date || '', plan.id) || null;
+                                let expandedObj = existingExpandedBefore ? { ...existingExpandedBefore } : null;
                                 for (const p of patches) {
-                                    if (p.op === 'replace' && typeof p.path === 'string') {
-                                        const path = p.path.replace(/^\//, '');
-                                        if (path.startsWith('session.') && updatedPlan) {
-                                            const key = path.replace('session.', '');
-                                            const targetSlot = updatedPlan.slots.find(s => s.plan.id === plan.id);
-                                            if (targetSlot) {
-                                                const before = { ...(targetSlot.plan as any) };
-                                                (targetSlot.plan as any)[key] = p.value;
-                                                diff[`patch:${path}`] = { before, after: targetSlot.plan };
+                                    try {
+                                        if (!p || typeof p.path !== 'string') continue;
+                                        const rawPath: string = p.path;
+                                        // normalize '/session/instructions/0' -> ['session','instructions','0']
+                                        const segs = rawPath.replace(/^\//, '').split('/').filter(Boolean);
+
+                                        // Determine target: session slot or expanded session
+                                        let targetObj: any = null;
+                                        let targetType: 'session' | 'expanded' | null = null;
+
+                                        if (segs[0] === 'session') {
+                                            targetType = 'session';
+                                            const slot = updatedPlan ? updatedPlan.slots.find((s: any) => s.plan.id === plan.id) : null;
+                                            targetObj = slot ? slot.plan : null;
+                                            segs.shift(); // remove 'session'
+                                        } else if (segs[0] === 'expanded') {
+                                            targetType = 'expanded';
+                                            // use in-loop expandedObj so multiple patches accumulate
+                                            if (!expandedObj) expandedObj = loadExpandedSession(date || '', plan.id) || {};
+                                            targetObj = expandedObj;
+                                            segs.shift();
+                                        } else {
+                                            // allow paths that target session fields without the 'session' prefix
+                                            const slot = updatedPlan ? updatedPlan.slots.find((s: any) => s.plan.id === plan.id) : null;
+                                            if (slot) {
+                                                targetType = 'session';
+                                                targetObj = slot.plan;
                                             }
                                         }
+
+                                        if (!targetObj) {
+                                            console.debug('Patch target not found for', rawPath);
+                                            continue;
+                                        }
+
+                                        const op = (p.op || 'replace').toLowerCase();
+
+                                        if (segs.length === 0) {
+                                            // path pointed to the whole target object
+                                            const before = { ...targetObj };
+                                            if (op === 'replace') {
+                                                // replace entire object
+                                                if (targetType === 'session') {
+                                                    // replace plan fields shallowly
+                                                    Object.assign(targetObj, p.value || {});
+                                                } else if (targetType === 'expanded') {
+                                                    const merged = { ...(loadExpandedSession(date || '', plan.id) || {}), ...(p.value || {}) };
+                                                    saveExpandedSession(date || '', plan.id, merged as any);
+                                                    targetObj = merged;
+                                                }
+                                                diff[`patch:${rawPath}`] = { before, after: targetObj };
+                                                if (targetType === 'session') appliedSessionPatch = true;
+                                                if (targetType === 'expanded') appliedExpandedPatch = true;
+                                            }
+                                            continue;
+                                        }
+
+                                        // If path targets an array index, e.g., instructions/2
+                                        const key = segs[0];
+                                        const rest = segs.slice(1);
+
+                                        if (rest.length === 0) {
+                                            const before = { ...(targetObj as any) };
+                                            if (op === 'replace') {
+                                                // replace top-level key
+                                                let val: any = p.value;
+                                                if (typeof val === 'string') {
+                                                    // attempt to parse JSON strings produced by LLM
+                                                    try { val = JSON.parse(val); } catch (_) { /* keep original string */ }
+                                                }
+                                                (targetObj as any)[key] = val;
+                                                diff[`patch:${rawPath}`] = { before, after: targetObj };
+                                            } else if (op === 'add') {
+                                                if (Array.isArray((targetObj as any)[key])) {
+                                                    (targetObj as any)[key].push(p.value);
+                                                    diff[`patch:${rawPath}`] = { before, after: targetObj };
+                                                } else {
+                                                    (targetObj as any)[key] = p.value;
+                                                    diff[`patch:${rawPath}`] = { before, after: targetObj };
+                                                }
+                                            }
+                                        } else {
+                                            // deeper path, e.g., instructions/2/step
+                                            const idx = Number(rest[0]);
+                                            if (!isNaN(idx) && Array.isArray((targetObj as any)[key])) {
+                                                const arr = (targetObj as any)[key];
+                                                const before = { ...(targetObj as any) };
+                                                if (rest.length === 1) {
+                                                    // instructions/2 -> replace that item
+                                                        if (op === 'replace') {
+                                                            let val: any = p.value;
+                                                            if (typeof val === 'string') {
+                                                                try { val = JSON.parse(val); } catch (_) { }
+                                                            }
+                                                            arr[idx] = val;
+                                                            diff[`patch:${rawPath}`] = { before, after: targetObj };
+                                                            if (targetType === 'session') appliedSessionPatch = true;
+                                                            if (targetType === 'expanded') appliedExpandedPatch = true;
+                                                        } else if (op === 'add') {
+                                                            // insert at index
+                                                            let val: any = p.value;
+                                                            if (typeof val === 'string') {
+                                                                try { val = JSON.parse(val); } catch (_) { }
+                                                            }
+                                                            arr.splice(idx, 0, val);
+                                                            diff[`patch:${rawPath}`] = { before, after: targetObj };
+                                                            if (targetType === 'session') appliedSessionPatch = true;
+                                                            if (targetType === 'expanded') appliedExpandedPatch = true;
+                                                        }
+                                                } else {
+                                                    // deeper property on array item, e.g., instructions/2/step
+                                                    const prop = rest[1];
+                                                    if (arr[idx]) {
+                                                        const beforeItem = { ...arr[idx] };
+                                                        if (op === 'replace') {
+                                                            let val: any = p.value;
+                                                            if (typeof val === 'string') {
+                                                                try { val = JSON.parse(val); } catch (_) { }
+                                                            }
+                                                            arr[idx][prop] = val;
+                                                            diff[`patch:${rawPath}`] = { before: beforeItem, after: arr[idx] };
+                                                            if (targetType === 'session') appliedSessionPatch = true;
+                                                            if (targetType === 'expanded') appliedExpandedPatch = true;
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                console.debug('Unsupported patch path format', rawPath);
+                                            }
+                                        }
+                                    } catch (inner) {
+                                        console.warn('Failed to apply patch', p, inner);
                                     }
+                                }
+                                // after applying patches, if expanded was modified, persist it
+                                if (appliedExpandedPatch && expandedObj) {
+                                    try { saveExpandedSession(date || '', plan.id, expandedObj as any); diff['expanded'] = { before: existingExpandedBefore, after: expandedObj }; } catch (_) {}
+                                }
+
+                                // if any session patches applied, ensure diff['session'] is present so later save logic runs
+                                if (appliedSessionPatch && updatedPlan) {
+                                    if (!diff['session']) diff['session'] = { before: beforePlan, after: updatedPlan };
                                 }
                             }
 
                               // Persist updated plan if any changes to plan
                             if (diff['session'] && updatedPlan) {
+                                // Sanitize updatedPlan fields (handle LLM returning JSON strings)
+                                try {
+                                    updatedPlan.slots = (updatedPlan.slots || []).map(s => {
+                                        const p = { ...(s || {}) } as any;
+                                        if (p.plan) {
+                                            // toolAudit should be array
+                                            if (typeof p.plan.toolAudit === 'string') {
+                                                try { p.plan.toolAudit = JSON.parse(p.plan.toolAudit); } catch (_) {
+                                                    // fallback: split comma-separated list
+                                                    p.plan.toolAudit = String(p.plan.toolAudit).split(/,\s*/).map((x: string) => x.trim()).filter(Boolean);
+                                                }
+                                            }
+                                            // instructions should be array
+                                            if (typeof p.plan.instructions === 'string') {
+                                                try { p.plan.instructions = JSON.parse(p.plan.instructions); } catch (_) {
+                                                    p.plan.instructions = String(p.plan.instructions).split(/\n/).map((x: string) => x.trim()).filter(Boolean);
+                                                }
+                                            }
+                                        }
+                                        return p;
+                                    });
+                                } catch (sanErr) { console.warn('Sanitize updatedPlan failed', sanErr); }
+
                                 // Save a version first
                                 const version = { id: changeId, date: updatedPlan.date, timestamp: Date.now(), author: 'nurse', description: proposedExplanation || 'Applied changes from chat', plan: beforePlan || updatedPlan };
                                 savePlanVersion(updatedPlan.date, version);
 
                                 // Smart save
-                                const saveRes = savePlanSmart(updatedPlan.date, updatedPlan);
-                                if (!saveRes.ok && saveRes.conflict) {
+                                saveResGlobal = savePlanSmart(updatedPlan.date, updatedPlan);
+                                if (!saveResGlobal.ok && saveResGlobal.conflict) {
                                     const overwrite = window.confirm('Plan changed elsewhere. Overwrite with local changes? OK=Overwrite');
                                     if (overwrite) savePlanSmart(updatedPlan.date, updatedPlan, { force: true });
                                     else {
@@ -340,11 +552,19 @@ export const SessionCard: React.FC<Props> = ({
                                 } catch (_) { }
                             }
 
-                            setReviewOpen(false);
-                            setProposedChanges(null);
-                            setProposedExplanation(undefined);
-                            setProposedSafetyFlags(undefined);
-                            alert('Applied selected changes.');
+                                // Final debug log
+                                try { console.debug('Apply results', { diff, saveRes: saveResGlobal }); } catch (_) {}
+
+                                if (Object.keys(diff).length === 0) {
+                                    alert('No changes were selected or the proposed changes were empty.');
+                                } else {
+                                    alert('Applied selected changes.');
+                                }
+
+                                setReviewOpen(false);
+                                setProposedChanges(null);
+                                setProposedExplanation(undefined);
+                                setProposedSafetyFlags(undefined);
                         } catch (e) {
                             console.error('Failed to apply changes', e);
                             alert('Failed to apply changes.');
@@ -688,9 +908,9 @@ export const SessionCard: React.FC<Props> = ({
                     <ClipboardList size={18} />
                     Tool Audit (Count In / Count Out)
                 </h3>
-                {plan.toolAudit && plan.toolAudit.length > 0 ? (
+                {auditList && auditList.length > 0 ? (
                     <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar pr-2">
-                        {plan.toolAudit.map((item, idx) => (
+                        {auditList.map((item, idx) => (
                             <button 
                                 key={idx}
                                 onClick={() => toggleAuditItem(idx)}
@@ -753,7 +973,7 @@ export const SessionCard: React.FC<Props> = ({
         </ul>
         <h3 className="font-bold mt-4">Instructions</h3>
         <ul className="list-decimal pl-5">
-            {(plan.instructions || []).map(s => <li key={s}>{s}</li>)}
+            {(Array.isArray(plan.instructions) ? plan.instructions : (typeof plan.instructions === 'string' ? String(plan.instructions).split('\n').map(s => s.trim()).filter(Boolean) : [])).map(s => <li key={s}>{s}</li>)}
         </ul>
       </div>
     </div>
